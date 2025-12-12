@@ -1,15 +1,15 @@
 import requests
 import json
+import os # 환경 변수를 사용하기 위해 추가
 from datetime import datetime, timedelta
 
 # ==========================================
-# 1. User Configuration (Modify this section)
+# 1. User Configuration & Authentication
 # ==========================================
-# Enter the 'Decoding' key obtained from data.go.kr here.
-SERVICE_KEY = "YOUR_DECODED_SERVICE_KEY_HERE"
+# Get the key from the system environment variable KMA_API_KEY.
+SERVICE_KEY = os.environ.get("KMA_API_KEY") 
 
-# Grid coordinates (e.g., Jongno-gu, Seoul -> 60, 127)
-# Search for "KMA grid coordinates Excel" to find your local coordinates.
+# Grid coordinates (Modify this)
 NX = "60"
 NY = "127"
 
@@ -18,23 +18,20 @@ NY = "127"
 # ==========================================
 def get_base_date_time():
     """
-    KMA Short-term Forecast updates every 3 hours (02:00, 05:00, 08:00, etc.).
-    This function calculates the most recent announcement time (base_time)
-    that occurred before the current time.
+    Calculates the base_date and base_time for the API request.
+    It uses a 15-minute buffer (current minute < 45) to ensure stability.
     """
     now = datetime.now()
     
-    # KMA recommends allowing approx. 10 minutes buffer (45 min past the hour)
+    # Allow a 15-minute buffer for KMA server updates
     if now.minute < 45: 
         now = now - timedelta(hours=1)
         
-    # Standard announcement times are 02, 05, 08, 11, 14, 17, 20, 23
     current_hour = now.hour
     base_date = now.strftime('%Y%m%d')
     
-    # Base Time Logic
+    # Standard announcement times are 02, 05, 08, 11, 14, 17, 20, 23
     if current_hour < 2:
-        # 00, 01 hours use the previous day's 2300 data
         base_time = "2300"
         base_date = (now - timedelta(days=1)).strftime('%Y%m%d')
     elif current_hour < 5:
@@ -60,14 +57,23 @@ def get_base_date_time():
 # 3. Data Request and Parsing
 # ==========================================
 def fetch_weather():
+    # ⚠️ Authentication Check
+    if not SERVICE_KEY:
+        print("Error: KMA_API_KEY environment variable is not set.")
+        print("Please set the key using: export KMA_API_KEY=\"YOUR_KEY\"")
+        return
+        
     base_date, base_time = get_base_date_time()
+    
+    # 🚨 DEBUG: Output the calculated base time for troubleshooting 401 errors
+    print(f"DEBUG_TIME: {base_date} {base_time}") 
     
     url = 'http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst'
     
     params = {
         'serviceKey': SERVICE_KEY,
         'pageNo': '1',
-        'numOfRows': '1000', # Request enough rows
+        'numOfRows': '1000',
         'dataType': 'JSON',
         'base_date': base_date,
         'base_time': base_time,
@@ -76,31 +82,27 @@ def fetch_weather():
     }
 
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=5) # 5초 타임아웃 추가
         
         # Check HTTP status code
         if response.status_code != 200:
-            print(f"Error: Server response code {response.status_code}")
+            print(f"HTTP Error: {response.status_code} (Check network or base_time)")
             return
 
         data = response.json()
         
         # Handle API error messages inside the JSON
         if data['response']['header']['resultCode'] != '00':
-            print(f"API Error: {data['response']['header']['resultMsg']}")
+            print(f"API Error ({data['response']['header']['resultCode']}): {data['response']['header']['resultMsg']}")
             return
 
         items = data['response']['body']['items']['item']
         
-        # Dictionary to store filtered weather data
-        weather_data = {}
-        
-        # KMA data is scattered by category (TMP, PTY, etc.).
-        # We only take data for the earliest forecast time (fcstTime)
         if not items:
-            print("Error: No forecast items received.")
+            print("Error: No forecast items received. Base time might be invalid.")
             return
             
+        weather_data = {}
         target_time = items[0]['fcstTime'] 
 
         for item in items:
@@ -110,27 +112,30 @@ def fetch_weather():
                 weather_data[cat] = val
 
         # ==========================================
-        # 4. Output Generation
+        # 4. Output Generation (Modify for Polybar/Conky)
         # ==========================================
-        # TMP: 1-hour temperature, SKY: Sky status, PTY: Precipitation type
         temp = weather_data.get('TMP', '-')
-        sky = weather_data.get('SKY', '0') # 1:Clear, 3:Mostly Cloudy, 4:Cloudy
-        pty = weather_data.get('PTY', '0') # 0:None, 1:Rain, 2:Rain/Snow, 3:Snow, 4:Shower
+        sky = weather_data.get('SKY', '0')
+        pty = weather_data.get('PTY', '0')
         
         # Text conversion logic
         weather_str = ""
         if pty != '0':
-            # Precipitation takes precedence over sky status
-            pty_map = {'1':'Rain', '2':'Rain/Snow', '3':'Snow', '4':'Shower'}
+            pty_map = {'1':'Rain', '2':'R/S', '3':'Snow', '4':'Shower'}
             weather_str = pty_map.get(pty, 'Wet')
         else:
             sky_map = {'1':'Clear', '3':'Cloudy', '4':'Overcast'}
             weather_str = sky_map.get(sky, 'Unknown')
 
+        # Polybar에 바로 출력하기 위해 DEBUG 메시지 제거
         print(f"{weather_str} {temp}°C")
 
+    except requests.exceptions.Timeout:
+        print("Request Timeout")
+    except requests.exceptions.ConnectionError:
+        print("Connection Error")
     except Exception as e:
-        print(f"Failed to fetch data: {e}")
+        print(f"Fetch Failed: {e}")
 
 if __name__ == "__main__":
     fetch_weather()
